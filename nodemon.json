@@ -1,0 +1,16 @@
+{
+    "watch": [
+        "src",
+        "app.ts",
+        "index.ts",
+        "config.ts"
+    ],
+    "ext": "ts",
+    "ignore": [
+        "*.json",
+        "*.log",
+        "env/*",
+        "node_modules/*",
+        ".git/*"
+    ]
+}
