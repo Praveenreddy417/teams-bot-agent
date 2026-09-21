@@ -40,8 +40,13 @@ function missingFieldsForType(body: AlertPayload): string[] {
   });
 }
 
-const BOT_PORT = parseInt(process.env.PORT ?? "3978", 10);
-const API_PORT = parseInt(process.env.API_PORT ?? "3979", 10);
+// Render (and most PaaS hosts) expose exactly one port externally, so the bot
+// messaging endpoint and the Alert API must share it. The bot's App listens
+// on an internal-only port; the external listener proxies /api/messages to
+// it and handles every other /api/* route itself.
+const EXTERNAL_PORT = parseInt(process.env.PORT ?? "3978", 10);
+const BOT_INTERNAL_PORT = parseInt(process.env.BOT_INTERNAL_PORT ?? String(EXTERNAL_PORT + 1), 10);
+const MESSAGING_ENDPOINT = "/api/messages";
 
 // ── Token acquisition ─────────────────────────────────────────────────────────
 async function getBotToken(): Promise<string> {
@@ -119,8 +124,8 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
-// ── Alert / Channel-Creation API server ────────────────────────────────────────
-const apiServer = http.createServer(async (req, res) => {
+// ── Alert / Channel-Creation API handler ────────────────────────────────────────
+async function apiHandler(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = (req.url ?? "/").split("?")[0];
   const method = req.method ?? "GET";
 
@@ -475,37 +480,71 @@ const apiServer = http.createServer(async (req, res) => {
       "POST /api/teamsbot-greet-team",
     ],
   }));
+}
+
+// ── Proxy Teams messaging traffic to the bot's internal-only port ──────────────
+function proxyToBot(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const proxyReq = http.request(
+    {
+      hostname: "127.0.0.1",
+      port: BOT_INTERNAL_PORT,
+      path: req.url,
+      method: req.method,
+      headers: req.headers,
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+      proxyRes.pipe(res);
+    }
+  );
+  proxyReq.on("error", (err) => {
+    console.error("❌ Bot proxy error:", err.message);
+    if (!res.headersSent) res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Bot server unreachable" }));
+  });
+  req.pipe(proxyReq);
+}
+
+// ── Single externally-reachable server: routes bot traffic vs. Alert API ───────
+const externalServer = http.createServer((req, res) => {
+  const url = (req.url ?? "/").split("?")[0];
+  if (url === MESSAGING_ENDPOINT || url.startsWith(`${MESSAGING_ENDPOINT}/`)) {
+    proxyToBot(req, res);
+    return;
+  }
+  apiHandler(req, res);
 });
 
 // ── Crash guards ───────────────────────────────────────────────────────────────
 process.on("uncaughtException", (err) => console.error("💥 UNCAUGHT:", err));
 process.on("unhandledRejection", (err) => console.error("💥 UNHANDLED:", err));
 
-apiServer.on("error", (err: NodeJS.ErrnoException) => {
+externalServer.on("error", (err: NodeJS.ErrnoException) => {
   if (err.code === "EADDRINUSE")
-    console.error(`❌ Port ${API_PORT} already in use.`);
+    console.error(`❌ Port ${EXTERNAL_PORT} already in use.`);
   else
-    console.error("❌ API server error:", err.message);
+    console.error("❌ External server error:", err.message);
   process.exit(1);
 });
 
 // ── Start both servers ────────────────────────────────────────────────────────
 (async () => {
   try {
-    await app.start(BOT_PORT);
-    console.log(`\n✅ Bot started      → http://localhost:${BOT_PORT}`);
+    await app.start(BOT_INTERNAL_PORT);
+    console.log(`\n✅ Bot started (internal) → http://127.0.0.1:${BOT_INTERNAL_PORT}`);
   } catch (err: any) {
     console.error("❌ Bot failed to start:", err.message);
     process.exit(1);
   }
 
-  apiServer.listen(API_PORT, "0.0.0.0", () => {
-    console.log(`📡 Alert API (all)       → http://localhost:${API_PORT}/api/alert`);
-    console.log(`📧 Alert API (members)   → http://localhost:${API_PORT}/api/alert/members`);
-    console.log(`💬 Alert API (channel)   → http://localhost:${API_PORT}/api/alert/channel`);
-    console.log(`❤️  Health                → http://localhost:${API_PORT}/api/health`);
-    console.log(`🔗 List teams             → http://localhost:${API_PORT}/api/teamsbot-list-teams`);
-    console.log(`🔗 Create channel         → http://localhost:${API_PORT}/api/teamsbot-dynamic-channel-creation`);
+  externalServer.listen(EXTERNAL_PORT, "0.0.0.0", () => {
+    console.log(`💬 Messaging endpoint     → http://localhost:${EXTERNAL_PORT}${MESSAGING_ENDPOINT}`);
+    console.log(`📡 Alert API (all)        → http://localhost:${EXTERNAL_PORT}/api/alert`);
+    console.log(`📧 Alert API (members)    → http://localhost:${EXTERNAL_PORT}/api/alert/members`);
+    console.log(`💬 Alert API (channel)    → http://localhost:${EXTERNAL_PORT}/api/alert/channel`);
+    console.log(`❤️  Health                 → http://localhost:${EXTERNAL_PORT}/api/health`);
+    console.log(`🔗 List teams              → http://localhost:${EXTERNAL_PORT}/api/teamsbot-list-teams`);
+    console.log(`🔗 Create channel          → http://localhost:${EXTERNAL_PORT}/api/teamsbot-dynamic-channel-creation`);
     console.log(`\n🚀 Integration Agent bot running!\n`);
   });
 })();

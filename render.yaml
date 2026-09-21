@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: teams-bot-agent
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: CLIENT_ID
+        sync: false
+      - key: CLIENT_SECRET
+        sync: false
+      - key: TENANT_ID
+        sync: false
+      - key: ALERT_API_KEY
+        sync: false
