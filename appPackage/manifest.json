@@ -64,5 +64,7 @@
         "identity",
         "messageTeamMembers"
     ],
-    "validDomains": []
+    "validDomains": [
+        "teams-bot-agent.onrender.com"
+    ]
 }
